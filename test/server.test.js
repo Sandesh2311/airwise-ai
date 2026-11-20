@@ -1,0 +1,27 @@
+import test, { before, after } from 'node:test';
+import assert from 'node:assert/strict';
+import { createServer } from '../server.js';
+
+let server, base, originalFetch, originalKey, lastGeminiRequest, geminiFailure=false;
+before(async()=>{
+  originalKey=process.env.GEMINI_API_KEY;process.env.GEMINI_API_KEY='test-only-key';
+  originalFetch=globalThis.fetch;
+  globalThis.fetch=async(url,options)=>{if(!String(url).includes('generativelanguage.googleapis.com'))return originalFetch(url,options);lastGeminiRequest={url:String(url),body:JSON.parse(options.body)};if(geminiFailure)return new Response('{}',{status:503});return new Response(JSON.stringify({candidates:[{content:{parts:[{text:'Grounded answer.'}]}}]}),{status:200,headers:{'content-type':'application/json'}});};
+  server=createServer();await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));base=`http://127.0.0.1:${server.address().port}`;
+});
+after(async()=>{await new Promise(resolve=>server.close(resolve));globalThis.fetch=originalFetch;if(originalKey===undefined)delete process.env.GEMINI_API_KEY;else process.env.GEMINI_API_KEY=originalKey;});
+async function postRaw(raw){return fetch(`${base}/api/assistant`,{method:'POST',headers:{'content-type':'application/json'},body:raw});}
+async function post(body){return postRaw(JSON.stringify(body));}
+const context={location:{name:'Delhi',country:'India',latitude:28.6,longitude:77.2},air:{provider:'Open-Meteo Air Quality',status:'modelled',observedAt:'2026-11-20T10:00',index:{name:'US AQI',value:64,category:'Moderate'},pollutants:{pm2_5:{value:13,unit:'µg/m³'},pm10:{value:30,unit:'µg/m³'}}}};
+
+test('normal assistant question returns a Gemini answer with compact context',async()=>{const r=await post({question:'Is a walk okay?',context});assert.equal(r.status,200);assert.equal((await r.json()).answer,'Grounded answer.');assert.match(lastGeminiRequest.body.contents[0].parts[0].text,/Delhi/);});
+test('maximum-length assistant question is accepted',async()=>{const r=await post({question:'q'.repeat(1000),context});assert.equal(r.status,200);assert.match(lastGeminiRequest.body.contents[0].parts[0].text,/q{1000}/);});
+test('consecutive assistant requests preserve only recent session turns',async()=>{const first=await post({question:'First question'});assert.equal(first.status,200);const history=[{role:'user',content:'First question'},{role:'assistant',content:'Grounded answer.'}];const second=await post({question:'Follow-up question',history});assert.equal(second.status,200);const prompt=lastGeminiRequest.body.contents[0].parts[0].text;assert.match(prompt,/First question/);assert.match(prompt,/Grounded answer/);assert.match(prompt,/Follow-up question/);});
+test('recent history is bounded, duplicate current turn omitted, and prior turns retained',async()=>{const history=[{role:'user',content:'old'},{role:'assistant',content:'old reply'},...Array.from({length:5},(_,i)=>({role:i%2?'assistant':'user',content:`recent ${i}`})),{role:'user',content:'current question'}];const r=await post({question:'current question',history,context});assert.equal(r.status,200);const prompt=lastGeminiRequest.body.contents[0].parts[0].text;assert.doesNotMatch(prompt,/old reply/);assert.equal(prompt.split('current question').length-1,1);assert.match(prompt,/recent 4/);});
+test('large forecast input within the body cap is summarized before Gemini',async()=>{const forecast=Array.from({length:120},(_,i)=>({time:`t${i}`,pm2_5:i,pm10:i*2,usAqi:i+10,unused:'ignored'}));const r=await post({question:'How does the forecast change?',context:{...context,forecast}});assert.equal(r.status,200);const prompt=lastGeminiRequest.body.contents[0].parts[0].text;assert.match(prompt,/forecastSummary/);assert.doesNotMatch(prompt,/unused/);assert.doesNotMatch(prompt,/t119/);assert.ok(prompt.length<2000);});
+test('empty question receives a controlled JSON validation error',async()=>{const r=await post({question:'   '});assert.equal(r.status,400);assert.match((await r.json()).error,/question/i);});
+test('long question above the character limit is rejected',async()=>{const r=await post({question:'x'.repeat(1001)});assert.equal(r.status,400);assert.match((await r.json()).error,/1,000/);});
+test('malformed JSON receives a controlled JSON error',async()=>{const r=await postRaw('{not json');assert.equal(r.status,400);assert.match((await r.json()).error,/Malformed JSON/);});
+test('oversized request receives JSON 413 without calling Gemini',async()=>{const r=await postRaw(JSON.stringify({question:'large context',context:{forecast:Array(5000).fill({pm2_5:10,pm10:20})}}));assert.equal(r.status,413);assert.match((await r.json()).error,/16 KiB/);assert.equal(lastGeminiRequest.body.contents[0].parts[0].text.includes('large context'),false);});
+test('Gemini provider failure returns a controlled JSON 502',async()=>{geminiFailure=true;try{const r=await post({question:'Will Gemini fail?',context});assert.equal(r.status,502);assert.match((await r.json()).error,/could not reach Gemini/);}finally{geminiFailure=false;}});
+test('favicon is served with the SVG content type',async()=>{const r=await fetch(`${base}/favicon.ico`);assert.equal(r.status,200);assert.match(r.headers.get('content-type'),/image\/svg\+xml/);assert.match(await r.text(),/<svg/);});
