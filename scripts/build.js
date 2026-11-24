@@ -6,7 +6,7 @@ import vercelHandler from '../api/[...path].js';
 const root = fileURLToPath(new URL('../', import.meta.url));
 const publicDir = path.join(root, 'public');
 const required = [
-  'server.js', 'api/[...path].js', 'vercel.json', 'src/core.js', 'src/api-handler.js',
+  'server.js', 'api/[...path].js', 'vercel.json', 'src/core.js', 'src/api-handler.js', 'src/knowledge-base.js', 'src/hybrid-assistant.js',
   'public/index.html', 'public/styles.css', 'public/app.js',
   'public/favicon.svg', 'README.md'
 ];
@@ -85,6 +85,11 @@ while (queue.length) {
     await copyFile(source, output);
     copied.add(browserPath);
   }
+}
+
+for (const module of ['/src/core.js', '/src/knowledge-base.js', '/src/hybrid-assistant.js']) {
+  if (!visited.has(module) || !copied.has(module)) throw new Error(`Required browser module is not included in the production output: ${module}`);
+  await access(path.join(publicDir, module.slice(1).split('/').join(path.sep)));
 }
 
 console.log(`Build check passed: ${htmlFiles.length} HTML entry point(s), ${visited.size} local browser asset(s), and Vercel function export verified.`);

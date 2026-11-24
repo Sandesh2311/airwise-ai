@@ -13,7 +13,7 @@ Air data is difficult to interpret and index scales are often confused. AirWise 
 - Current PM2.5, PM10, NO₂, SO₂, CO and ozone when supplied.
 - US AQI and European AQI explicitly identified and kept separate.
 - Five-day modelled pollutant forecast chart, source timestamp and model status.
-- Optional Gemini assistant grounded in selected location and available readings.
+- Hybrid assistant: 46 reviewed offline knowledge-base answers, zero-network quick prompts, and optional Gemini answers for other questions, grounded in selected location and available readings.
 - General safety advice, pollutant explainers, mobile layout and keyboard focus states.
 - API timeout, server-side caching, request validation and per-address rate limiting. Assistant requests use a compact context, at most six recent turns, and a 16 KiB JSON body limit.
 
@@ -24,6 +24,7 @@ flowchart LR
   Browser[Accessible dashboard] --> App[Node HTTP API]
   App --> Geo[Open-Meteo geocoding]
   App --> AQ[Open-Meteo Air Quality]
+  Browser -->|offline match| KB[Static knowledge base]
   App -->|optional, server key| Gemini[Gemini generateContent]
   AQ --> Normalize[Validated normalized response]
   Normalize --> Browser
@@ -39,7 +40,7 @@ Open-Meteo Air Quality API supplies modelled pollutant concentrations and US/EU 
 
 ## GenAI integration
 
-When `GEMINI_API_KEY` is set on the server, POST `/api/assistant` sends the user's question and selected normalized readings/forecast to Gemini's `generateContent` API. The prompt asks Gemini to ground current-condition statements in supplied values, identify missing data, avoid diagnosis, and provide concise general guidance. Responses are plain text rendered using `textContent`. Without a key, the server returns an explicit unavailable response; it does not pretend a fallback was generated.
+The browser first checks the reviewed, dependency-free static knowledge base. The three quick prompts and strong custom matches are answered locally without a request. Current AQI/location questions always fetch live provider data and are never answered from static entries or Gemini; if live data is missing, the app says so. Other questions use POST `/api/assistant` when available. Gemini answers are labeled Gemini, knowledge entries Knowledge Base, and fetched readings Live Data. If Gemini fails, a relevant lower-confidence offline match is attempted; otherwise the assistant transparently reports that advanced AI is unavailable. The server-side Gemini prompt grounds current-condition statements in supplied values, identifies missing data, avoids diagnosis, and provides concise general guidance. Responses are rendered with `textContent`.
 
 ## Security and privacy
 
@@ -72,7 +73,7 @@ Open http://localhost:3000. The local server loads `.env` if present; deployment
 
 ## Demo mode
 
-There are no hardcoded sample readings or demo data mode. The dashboard starts empty until a location is selected and a live provider response is received. If Gemini is not configured, assistant responses are marked unavailable.
+There are no hardcoded sample readings or demo data mode. The dashboard starts empty until a location is selected and a live provider response is received. The knowledge base and all three suggested questions work without Gemini configuration; only custom questions without a reliable offline match need the Gemini key.
 
 ## Tests and scripts
 
@@ -92,7 +93,7 @@ For a conventional Node.js host, set `PORT` and optional `GEMINI_API_KEY`/`GEMIN
 - Open-Meteo endpoints require network availability.
 - Gemini has not been exercised without a configured key and network connection in this workspace.
 - Forecast activity-window ranking and historical yesterday comparison are not implemented because provider/historical data may be unavailable.
-- Tests cover core normalization and guidance, not full browser workflows.
+- Tests cover all quick prompts, knowledge-base matching and fallback policy, live-reading safeguards, core normalization and guidance. Full browser workflow automation is not configured.
 
 ## Disclaimer
 
