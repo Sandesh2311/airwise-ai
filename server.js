@@ -18,10 +18,14 @@ const ASSISTANT_BODY_LIMIT=16*1024;
 function readJsonBody(req,limit=ASSISTANT_BODY_LIMIT){return new Promise(resolve=>{
   const declared=Number(req.headers['content-length']);
   if(Number.isFinite(declared)&&declared>limit){req.resume();resolve({error:{status:413,message:'Assistant request exceeds the 16 KiB limit. Send a shorter message and compact context.'}});return;}
+  const contentType=(req.headers['content-type']||'').split(';')[0].trim().toLowerCase();
+  if(contentType!=='application/json'){req.resume();resolve({error:{status:415,message:'Content-Type must be application/json.'}});return;}
+  // Vercel's Node runtime may provide the parsed request body directly.
+  if(req.body!==undefined){try{const raw=typeof req.body==='string'?req.body:Buffer.isBuffer(req.body)?req.body.toString('utf8'):JSON.stringify(req.body);if(Buffer.byteLength(raw)>limit){resolve({error:{status:413,message:'Assistant request exceeds the 16 KiB limit. Send a shorter message and compact context.'}});return;}const body=typeof req.body==='object'&&!Buffer.isBuffer(req.body)?req.body:JSON.parse(raw);resolve({body});}catch{resolve({error:{status:400,message:'Malformed JSON request body.'}});}return;}
   const chunks=[];let size=0,finished=false;
   const settle=value=>{if(!finished){finished=true;req.removeAllListeners('data');req.removeAllListeners('end');req.removeAllListeners('error');resolve(value);}};
   req.on('data',chunk=>{size+=chunk.length;if(size>limit){settle({error:{status:413,message:'Assistant request exceeds the 16 KiB limit. Send a shorter message and compact context.'}});req.resume();return;}chunks.push(chunk);});
-  req.on('end',()=>{if(finished)return;const contentType=(req.headers['content-type']||'').split(';')[0].trim().toLowerCase();if(contentType!=='application/json'){settle({error:{status:415,message:'Content-Type must be application/json.'}});return;}try{const body=JSON.parse(Buffer.concat(chunks).toString('utf8'));settle({body});}catch{settle({error:{status:400,message:'Malformed JSON request body.'}});}});
+  req.on('end',()=>{if(finished)return;try{const body=JSON.parse(Buffer.concat(chunks).toString('utf8'));settle({body});}catch{settle({error:{status:400,message:'Malformed JSON request body.'}});}});
   req.on('error',()=>settle({error:{status:400,message:'Could not read request body.'}}));
 });}
 async function fetchJson(url, timeout=9000) {
@@ -30,7 +34,7 @@ async function fetchJson(url, timeout=9000) {
   finally { clearTimeout(timer); }
 }
 function rateLimit(req) {
-  const key=req.socket.remoteAddress || 'local'; const now=Date.now(); const old=hits.get(key) || {start:now,count:0};
+  const key=req.socket?.remoteAddress || req.headers['x-forwarded-for']?.split(',')[0]?.trim() || 'local'; const now=Date.now(); const old=hits.get(key) || {start:now,count:0};
   if(now-old.start>WINDOW_MS){old.start=now;old.count=0;} old.count++; hits.set(key,old); return old.count<=60;
 }
 async function api(req,res,url) {
@@ -68,15 +72,19 @@ async function api(req,res,url) {
   }
   return send(res,404,{error:'Not found.'});
 }
-export function createServer(){return http.createServer(async(req,res)=>{
-  const url=new URL(req.url,'http://localhost');
-  if(url.pathname.startsWith('/api/')) return api(req,res,url);
-  if(req.method!=='GET'&&req.method!=='HEAD'){res.writeHead(405);return res.end();}
-  let pathname=normalize(decodeURIComponent(url.pathname)).replaceAll('\\','/').replace(/^([.][.][/\\])+/, ''); if(pathname==='/'||pathname==='\\') pathname='/index.html';if(pathname==='/favicon.ico')pathname='/favicon.svg';
-  const base=pathname.startsWith('/src/')?root:join(root,'public');
-  const file=join(base,pathname.replace(/^[/\\]+/,''));
-  try { const data=await readFile(file);res.writeHead(200,{'content-type':mime[extname(file)]||'application/octet-stream','x-content-type-options':'nosniff','referrer-policy':'strict-origin-when-cross-origin','content-security-policy':"default-src 'self'; connect-src 'self' https://air-quality-api.open-meteo.com https://geocoding-api.open-meteo.com; style-src 'self'; script-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"});res.end(req.method==='HEAD'?undefined:data); }
-  catch{res.writeHead(404);res.end('Not found');}
-});}
+export async function handleRequest(req,res){
+  try{
+    const url=new URL(req.url,'http://localhost');
+    if(url.pathname.startsWith('/api/')) return api(req,res,url);
+    if(req.method!=='GET'&&req.method!=='HEAD'){res.writeHead(405);return res.end();}
+    let pathname=normalize(decodeURIComponent(url.pathname)).replaceAll('\\','/').replace(/^([.][.][/\\])+/, ''); if(pathname==='/'||pathname==='\\') pathname='/index.html';if(pathname==='/favicon.ico')pathname='/favicon.svg';
+    const base=pathname.startsWith('/src/')?root:join(root,'public');
+    const file=join(base,pathname.replace(/^[/\\]+/,''));
+    try { const data=await readFile(file);res.writeHead(200,{'content-type':mime[extname(file)]||'application/octet-stream','x-content-type-options':'nosniff','referrer-policy':'strict-origin-when-cross-origin','content-security-policy':"default-src 'self'; connect-src 'self' https://air-quality-api.open-meteo.com https://geocoding-api.open-meteo.com; style-src 'self'; script-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"});res.end(req.method==='HEAD'?undefined:data); }
+    catch{res.writeHead(404);res.end('Not found');}
+  }catch{if(!res.headersSent)send(res,500,{error:'Request could not be completed.'});else res.end();}
+}
+export default handleRequest;
+export function createServer(){return http.createServer(handleRequest);}
 const invoked=process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url);
 if(invoked){const server=createServer();const port=Number(process.env.PORT)||3000;server.listen(port,()=>console.log(`AirWise AI available at http://localhost:${port}`));}

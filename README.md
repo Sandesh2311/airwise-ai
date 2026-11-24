@@ -43,7 +43,7 @@ When `GEMINI_API_KEY` is set on the server, POST `/api/assistant` sends the user
 
 ## Security and privacy
 
-Credentials remain in server environment variables. The app does not persist location history. Assistant requests are reduced to current readings and a small forecast summary, limited to six recent conversation messages, and capped at 16 KiB; each question is limited to 1,000 characters and history messages to 600. Other city/question inputs are validated, upstream requests have timeouts, response errors are generalized, and a simple in-memory per-IP rate limit is applied. There is no CORS allowance because the UI is served same-origin. No hosting-platform configuration exists in this repository. A host or reverse proxy may enforce a lower body limit before requests reach Node, so deployed limits should accommodate compact payloads (normally a few KiB) or provide a useful edge-level 413 response. A production deployment should use TLS and a shared rate-limit/cache store if horizontally scaled. Third party API responses can be delayed or unavailable.
+Credentials remain in server environment variables. The app does not persist location history. Assistant requests are reduced to current readings and a small forecast summary, limited to six recent conversation messages, and capped at 16 KiB; each question is limited to 1,000 characters and history messages to 600. Other city/question inputs are validated, upstream requests have timeouts, response errors are generalized, and a simple in-memory per-IP rate limit is applied. There is no CORS allowance because the UI is served same-origin. On Vercel, static files are served from `public/` and `/api/*` is dispatched to the catch-all function in `api/`; any deployment-platform body limits still apply before application validation. A production deployment should use TLS and a shared rate-limit/cache store if horizontally scaled. Third party API responses can be delayed or unavailable.
 
 ## Accessibility
 
@@ -59,7 +59,7 @@ cp .env.example .env
 npm start
 ```
 
-Open http://localhost:3000. The server does not load `.env` automatically; export variables in your shell or use your deployment platform's secret settings. On PowerShell: `$env:GEMINI_API_KEY="your-key"; npm start`.
+Open http://localhost:3000. The local server loads `.env` if present; deployment secrets should be configured in the hosting platform. On PowerShell, you can also set `$env:GEMINI_API_KEY="your-key"; npm start`.
 
 ### Environment variables
 
@@ -80,7 +80,11 @@ There are no hardcoded sample readings or demo data mode. The dashboard starts e
 
 ## Deployment
 
-Deploy on a Node.js 20+ host. Set `PORT` and optional `GEMINI_API_KEY`/`GEMINI_MODEL` as environment secrets, start with `npm start`, and expose the service over HTTPS through the platform's TLS endpoint. Configure health checks against `/api/health`. The in-memory cache and limiter are per process.
+### Vercel
+
+The checked-in `vercel.json` selects the Other framework preset, runs `npm run build`, and publishes the existing `public/` directory. Vercel discovers `api/[...path].js` as a Node function; it has an explicit default handler that dispatches API requests through the shared request handler. The root `server.js` remains the local development server and is not configured as a function. Set `GEMINI_API_KEY` (and optionally `GEMINI_MODEL`) under Vercel Project Settings → Environment Variables for each target environment. Do not commit `.env` or put the key in a `NEXT_PUBLIC_*`/browser variable. `PORT` is only relevant to local/server deployments. The in-memory cache and rate limiter are per function instance.
+
+For a conventional Node.js host, set `PORT` and optional `GEMINI_API_KEY`/`GEMINI_MODEL`, start with `npm start`, and expose the service over HTTPS. Configure health checks against `/api/health`.
 
 ## Known limitations
 
