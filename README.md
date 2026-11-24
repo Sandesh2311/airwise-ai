@@ -67,7 +67,7 @@ Open http://localhost:3000. The local server loads `.env` if present; deployment
 |---|---|---|
 | `PORT` | No | HTTP port (default 3000) |
 | `GEMINI_API_KEY` | No | Enables grounded Gemini answers; keep server-side |
-| `GEMINI_MODEL` | No | Gemini model name (default `gemini-2.0-flash`) |
+| `GEMINI_MODEL` | No | Gemini model name (default `gemini-3.8-flash`) |
 | `DATA_GOV_IN_API_KEY` | No | Reserved for a future verified CPCB/data.gov.in integration; currently unused |
 
 ## Demo mode
@@ -82,7 +82,7 @@ There are no hardcoded sample readings or demo data mode. The dashboard starts e
 
 ### Vercel
 
-The checked-in `vercel.json` selects the Other framework preset, runs `npm run build`, and publishes the existing `public/` directory. Vercel discovers `api/[...path].js` as a Node function; it has an explicit default handler that dispatches API requests through the shared request handler. The root `server.js` remains the local development server and is not configured as a function. Set `GEMINI_API_KEY` (and optionally `GEMINI_MODEL`) under Vercel Project Settings → Environment Variables for each target environment. Do not commit `.env` or put the key in a `NEXT_PUBLIC_*`/browser variable. `PORT` is only relevant to local/server deployments. The in-memory cache and rate limiter are per function instance.
+The checked-in `vercel.json` selects the Other framework preset, runs `npm run build`, publishes `public/`, and allows the API function up to 30 seconds for its bounded provider request and one retry. The build walks local browser dependencies starting from every HTML page, fails on missing imports or assets, and copies modules referenced under `/src/` into `public/src/`; the generated copy is ignored by Git. Vercel discovers `api/[...path].js` as a Node function with an explicit default handler that imports only `src/api-handler.js`; the root `server.js` is a local static/API development server and is not bundled as the Vercel function entry point. Set `GEMINI_API_KEY` (and optionally `GEMINI_MODEL=gemini-3.8-flash`) under Vercel Project Settings → Environment Variables for each target environment. Do not commit `.env` or put the key in a `NEXT_PUBLIC_*`/browser variable. `PORT` is only relevant to local/server deployments. The in-memory cache and rate limiter are per function instance.
 
 For a conventional Node.js host, set `PORT` and optional `GEMINI_API_KEY`/`GEMINI_MODEL`, start with `npm start`, and expose the service over HTTPS. Configure health checks against `/api/health`.
 
