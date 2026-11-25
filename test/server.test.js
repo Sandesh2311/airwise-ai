@@ -33,3 +33,65 @@ test('Gemini invalid credentials return an actionable server-side error',async()
 test('Gemini malformed success payload returns a controlled error',async()=>{geminiMalformed=true;try{const r=await post({question:'Will Gemini return JSON?',context});assert.equal(r.status,502);assert.match((await r.json()).error,/invalid response/);}finally{geminiMalformed=false;}});
 test('frontend core module is served with a JavaScript MIME type',async()=>{const r=await fetch(`${base}/src/core.js`);assert.equal(r.status,200);assert.match(r.headers.get('content-type'),/javascript/);assert.match(await r.text(),/export const POLLUTANTS/);});
 test('favicon is served with the SVG content type',async()=>{const r=await fetch(`${base}/favicon.ico`);assert.equal(r.status,200);assert.match(r.headers.get('content-type'),/image\/svg\+xml/);assert.match(await r.text(),/<svg/);});
+
+test('geocoding keeps valid locations, caches results, and handles malformed provider data', async t => {
+  const previousFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = previousFetch; });
+  const location = { name: 'Delhi', country: 'India', admin1: 'Delhi', latitude: 28.6, longitude: 77.2 };
+  let providerCalls = 0;
+  globalThis.fetch = (url, options) => {
+    if (new URL(url).hostname !== 'geocoding-api.open-meteo.com') return previousFetch(url, options);
+    providerCalls++;
+    const results = new URL(url).searchParams.get('name') === 'Broken'
+      ? {}
+      : [null, location, { ...location, latitude: 100 }];
+    return Response.json({ results });
+  };
+  for (const city of ['Delhi', 'delhi']) {
+    const response = await fetch(`${base}/api/geocode?q=${city}`);
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), [location]);
+  }
+  assert.equal(providerCalls, 1);
+  const response = await fetch(`${base}/api/geocode?q=Broken`);
+  assert.equal(response.status, 502);
+  assert.deepEqual(await response.json(), { error: 'City search is temporarily unavailable. Please retry.' });
+});
+
+test('air endpoint rejects missing and blank coordinates and accepts explicit zero', async t => {
+  const previousFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = previousFetch; });
+  let providerCalls = 0;
+  globalThis.fetch = (url, options) => {
+    if (new URL(url).hostname !== 'air-quality-api.open-meteo.com') return previousFetch(url, options);
+    providerCalls++;
+    return Response.json({ current: { us_aqi: 62, european_aqi: 18, pm2_5: 12.34 } });
+  };
+  for (const query of ['', '?lat=0', '?lat=%20&lon=0', '?lat=91&lon=0']) {
+    const response = await fetch(`${base}/api/air${query}`);
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), { error: 'Valid coordinates are required.' });
+  }
+  assert.equal(providerCalls, 0);
+  for (let i = 0; i < 2; i++) {
+    const response = await fetch(`${base}/api/air?lat=0&lon=0`);
+    assert.equal(response.status, 200);
+    const data = await response.json();
+    assert.deepEqual(data.location, { latitude: 0, longitude: 0 });
+    assert.equal(data.index.name, 'US AQI');
+    assert.equal(data.europeanIndex.name, 'European AQI');
+    assert.equal(data.pollutants.pm2_5.value, 12.34);
+  }
+  assert.equal(providerCalls, 1);
+});
+
+test('Gemini success payload without text returns a controlled provider error', async t => {
+  const previousFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = previousFetch; });
+  globalThis.fetch = (url, options) => new URL(url).hostname === 'generativelanguage.googleapis.com'
+    ? Response.json({ candidates: [{ content: { parts: [null, { text: 123 }] } }] })
+    : previousFetch(url, options);
+  const response = await post({ question: 'Does Gemini have a usable answer?' });
+  assert.equal(response.status, 502);
+  assert.deepEqual(await response.json(), { error: 'Gemini returned no usable text. Please retry.' });
+});

@@ -21,7 +21,7 @@ Air data is difficult to interpret and index scales are often confused. AirWise 
 
 ```mermaid
 flowchart LR
-  Browser[Accessible dashboard] --> App[Node HTTP API]
+  Browser[Dashboard served from public/] --> App[Shared Node API handler]
   App --> Geo[Open-Meteo geocoding]
   App --> AQ[Open-Meteo Air Quality]
   Browser -->|offline match| KB[Static knowledge base]
@@ -33,6 +33,25 @@ flowchart LR
 ## Stack
 
 Node.js 20+ with native HTTP/fetch, HTML, CSS and browser ES modules. The visualization is native SVG; no chart dependency is required. Tests use Node's built-in test runner.
+
+| Path | Responsibility |
+|---|---|
+| `public/` | Dashboard, styling, browser event handlers and assistant rendering |
+| `src/` | Shared data normalization and assistant validation, knowledge-base matching, response routing and the server API |
+| `server.js` | Local Node HTTP server for the dashboard and API |
+| `api/[...path].js` | Vercel entry point for the shared API handler |
+| `scripts/` and `test/` | Build and syntax checks, unit tests and HTTP integration tests |
+
+### API contracts
+
+| Endpoint | Inputs and successful response |
+|---|---|
+| `GET /api/health` | Returns `{ status: "ok" }`. |
+| `GET /api/geocode` | Accepts `q` containing 2–80 characters. Returns an array of locations with names and coordinates. |
+| `GET /api/air` | Requires numeric `lat` and `lon`. Returns normalized readings, distinct US and European indices when available, timestamps and hourly forecast data. |
+| `POST /api/assistant` | Accepts JSON with a required `question` and optional `context` and `history`. Returns `{ answer, provider: "Gemini" }` on success. |
+
+Failure responses use an `error` string. A missing Gemini key returns HTTP 503 with `unavailable: true`. The browser can still answer suggested questions and relevant custom questions from its bundled knowledge base.
 
 ## Data sources and limitations
 
@@ -77,7 +96,7 @@ There are no hardcoded sample readings or demo data mode. The dashboard starts e
 
 ## Tests and scripts
 
-`npm test` runs deterministic unit tests against normalized fixture data. `npm run lint` performs JavaScript syntax checks. `npm run build` verifies required application artifacts. These scripts do not provide measured coverage, browser workflow automation, a full lint rule set, or an npm dependency audit. The project currently has no installed third-party npm dependencies; `npm audit` cannot evaluate runtime APIs or services.
+`npm test` runs unit tests and local HTTP integration tests with provider fixtures. It covers normalized AQI, cached geocoding and air data, offline matching, Gemini response and failure handling, request validation, and local asset URLs. Run `node --experimental-test-coverage --test` for Node's coverage report. The report includes the test files and covers modules loaded by the Node runner. `npm run lint` checks JavaScript syntax. `npm run build` verifies the Vercel handler and prepares the browser assets. The project has no third-party npm dependencies.
 
 ## Deployment
 
@@ -91,7 +110,7 @@ For a conventional Node.js host, set `PORT` and optional `GEMINI_API_KEY`/`GEMIN
 
 - No official CPCB integration or Indian National AQI calculation is implemented.
 - Open-Meteo endpoints require network availability.
-- Gemini has not been exercised without a configured key and network connection in this workspace.
+- Gemini requires a valid key, a reachable provider and a model available to the configured account.
 - Forecast activity-window ranking and historical yesterday comparison are not implemented because provider/historical data may be unavailable.
 - Tests cover all quick prompts, knowledge-base matching and fallback policy, live-reading safeguards, core normalization and guidance. Full browser workflow automation is not configured.
 

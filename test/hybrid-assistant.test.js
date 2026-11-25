@@ -48,10 +48,15 @@ test('Gemini failure uses relevant offline fallback or transparent unavailable r
 });
 test('current AQI questions require live data and cannot fabricate/fall through', async () => {
   assert.equal(isLiveAirQuestion('current AQI in Delhi'), true);
+  assert.equal(isLiveAirQuestion('What is the current AQI?'), true);
+  assert.equal(isLiveAirQuestion('What is the current AQI in Delhi?'), true);
+  assert.equal(isLiveAirQuestion('What is AQI?'), false);
   assert.equal(isLiveAirQuestion('Delhi AQI'), true);
   assert.equal(isLiveAirQuestion('Delhi ka AQI abhi kya hai'), true);
   assert.equal(isLiveAirQuestion('Where can I find a current official CPCB AQI?'), false);
   assert.equal(extractLiveCity('Delhi ka AQI abhi kya hai'), 'delhi');
+  assert.equal(extractLiveCity('What is the current AQI in Delhi?'), 'delhi');
+  assert.equal(extractLiveCity('What is the current AQI?'), '');
   let geminiCalls = 0;
   const failed = await resolveAssistantResponse('current AQI in Delhi', { callGemini: async () => { geminiCalls++; return { answer: 'AQI 42' }; }, answerLive: async () => { throw Error('provider unavailable'); } });
   assert.equal(failed.answer, LIVE_UNAVAILABLE);

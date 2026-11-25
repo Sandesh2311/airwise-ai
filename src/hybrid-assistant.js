@@ -3,6 +3,10 @@ import { FALLBACK_MATCH_THRESHOLD, getSuggestedAnswer, isLiveAirQuestion, matchK
 export const LIVE_UNAVAILABLE = 'I cannot provide a current AQI reading because live air-quality data is unavailable. Please try again later or check an official local monitoring source.';
 export const AI_UNAVAILABLE = 'Advanced AI assistance is temporarily unavailable, and I could not find a reliable offline answer. Please try again later.';
 
+/**
+ * Route to the knowledge base, live data or Gemini and label the result by route.
+ * Live-reading requests stay on the live route even when the provider fails.
+ */
 export async function resolveAssistantResponse(question, { suggested = false, callGemini, answerLive } = {}) {
   if (suggested) {
     const item = getSuggestedAnswer(question);

@@ -331,17 +331,16 @@ export function normalizeQuestion(value) {
   return text.replace(/[^\p{L}\p{N}]+/gu, ' ').replace(/\s+/g, ' ').trim();
 }
 
-function tokens(value) {
-  return normalizeQuestion(value).split(' ').filter(token => token && !STOP_WORDS.has(token)).map(token => TOKEN_SYNONYMS.get(token) || token);
+function tokenSet(normalized) {
+  return new Set(normalized.split(' ').filter(token => token && !STOP_WORDS.has(token))
+    .map(token => TOKEN_SYNONYMS.get(token) || token));
 }
 
-function entryScore(question, entry) {
-  const normalized = normalizeQuestion(question);
+function entryScore(normalized, queryTokens, entry) {
   const variants = [entry.question, ...(entry.aliases || [])].map(normalizeQuestion);
   if (variants.includes(normalized)) return 1;
-  const queryTokens = new Set(tokens(question));
   if (!queryTokens.size) return 0;
-  const entryTokens = new Set(tokens([entry.question, ...(entry.aliases || []), ...(entry.keywords || [])].join(' ')));
+  const entryTokens = tokenSet(normalizeQuestion([entry.question, ...(entry.aliases || []), ...(entry.keywords || [])].join(' ')));
   let overlap = 0;
   for (const token of queryTokens) if (entryTokens.has(token)) overlap++;
   const queryCoverage = overlap / queryTokens.size;
@@ -350,10 +349,10 @@ function entryScore(question, entry) {
   return Math.min(0.95, queryCoverage * 0.68 + entryCoverage * 0.32 + phraseBonus);
 }
 
-const LIVE_TERMS = /\b(current|now|today|live|latest|right now|currently|current|abhi|aaj|filhal|vartaman)\b/u;
+const LIVE_TERMS = /\b(current|now|today|live|latest|currently|abhi|aaj|filhal|vartaman)\b/u;
 const READING_TERMS = /\b(aqi|pm25|pm10|air quality|pollution level|pollution today|air pollution)\b/u;
 const LOCATION_WORDS = /\b(?:in|at|for|near|mein|me)\b|\b(?:ka|ki)\s+(?:aqi|air quality|pollution)\b/u;
-const STATIC_QUESTION_TERMS = /\b(category|categories|range|ranges|standard|standards|calculate|calculated|calculation|meaning|mean|what is|define|measurements?)\b/u;
+const STATIC_QUESTION_TERMS = /\b(category|categories|range|ranges|standard|standards|calculate|calculated|calculation|meaning|mean|define|measurements?)\b/u;
 const STATIC_LOOKUP_HELP = /\b(where can i find|how do i check|how can i check|official source|official cpcb)\b/u;
 const CITY_BEFORE_READING = /\b[a-z][a-z -]{1,40}\s+(?:aqi|air quality|pollution level)\b/u;
 
@@ -361,16 +360,20 @@ export function isLiveAirQuestion(value) {
   const normalized = normalizeQuestion(value);
   if (!READING_TERMS.test(normalized)) return false;
   if (STATIC_QUESTION_TERMS.test(normalized) || STATIC_LOOKUP_HELP.test(normalized)) return false;
-  return LIVE_TERMS.test(normalized) || LOCATION_WORDS.test(normalized) || CITY_BEFORE_READING.test(normalized);
+  if (LIVE_TERMS.test(normalized)) return true;
+  // The city-prefix heuristic would otherwise treat “what is the” as a place.
+  if (/\bwhat is\b/u.test(normalized)) return false;
+  return LOCATION_WORDS.test(normalized) || CITY_BEFORE_READING.test(normalized);
 }
 
 export function matchKnowledgeBase(question, { threshold = STRONG_MATCH_THRESHOLD } = {}) {
   if (isLiveAirQuestion(question)) return null;
   const normalized = normalizeQuestion(question);
   if (!normalized) return null;
+  const queryTokens = tokenSet(normalized);
   let best = null;
   for (const entry of KNOWLEDGE_BASE) {
-    const confidence = entryScore(question, entry);
+    const confidence = entryScore(normalized, queryTokens, entry);
     if (!best || confidence > best.confidence) best = { entry, confidence };
   }
   return best && best.confidence >= threshold ? best : null;

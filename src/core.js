@@ -17,6 +17,18 @@ export function normalizeAirData(raw, location={}) {
 const finite=x=>typeof x==='number'&&Number.isFinite(x)&&x>=0; const val=x=>finite(x)?x:null;
 function category(n,type){if(type==='us')return n<=50?'Good':n<=100?'Moderate':n<=150?'Unhealthy for sensitive groups':n<=200?'Unhealthy':n<=300?'Very unhealthy':'Hazardous';return n<=20?'Good':n<=40?'Fair':n<=60?'Moderate':n<=80?'Poor':n<=100?'Very poor':'Extremely poor';}
 export function validateQuestion(question){if(typeof question!=='string'||!question.trim())return{ok:false,error:'Enter a question to continue.'};if(question.length>1000)return{ok:false,error:'Keep your question under 1,000 characters.'};return{ok:true,value:question.trim()};}
+/** Limit validated conversation messages and omit a trailing copy of the current question. */
+export function recentAssistantHistory(history, question) {
+  const recent = [];
+  for (const item of history.slice(-6)) {
+    const previous = recent.at(-1);
+    if (previous?.role === item.role && previous.content === item.content) continue;
+    recent.push(item);
+  }
+  const last = recent.at(-1);
+  if (last?.role === 'user' && last.content === question) recent.pop();
+  return recent;
+}
 const textValue=(v,max)=>typeof v==='string'?v.trim().slice(0,max):'';
 const nonnegative=(v)=>typeof v==='number'&&Number.isFinite(v)&&v>=0?v:null;
 const coordinate=(v,limit)=>typeof v==='number'&&Number.isFinite(v)&&Math.abs(v)<=limit?v:null;
@@ -41,9 +53,7 @@ export function validateAssistantRequest(body){
   const inputHistory=body.history||[];if(inputHistory.length>20)return{ok:false,status:400,error:'Conversation history is too long. Keep the last 6 messages.'};
   const history=[];
   for(const item of inputHistory){if(!item||typeof item!=='object'||!['user','assistant'].includes(item.role)||typeof item.content!=='string')return{ok:false,status:400,error:'Conversation history contains an invalid message.'};const content=item.content.trim();if(!content||content.length>600)return{ok:false,status:400,error:'Each history message must be between 1 and 600 characters.'};history.push({role:item.role,content});}
-  const recent=[];for(const item of history.slice(-6)){const previous=recent.at(-1);if(previous?.role===item.role&&previous.content===item.content)continue;recent.push(item);}
-  // The current prompt is supplied separately, so do not repeat an identical trailing user turn.
-  if(recent.at(-1)?.role==='user'&&recent.at(-1).content===question.value)recent.pop();
+  const recent = recentAssistantHistory(history, question.value);
   return{ok:true,value:{question:question.value,history:recent,context:compactAssistantContext(body.context)}};
 }
 export function makePrompt(question,context,history=[]){const transcript=history.map(x=>`${x.role==='user'?'User':'Assistant'}: ${x.content}`).join('\n');return `You are AirWise, a careful urban air quality explainer. Answer briefly in the user's language when possible. Use only supplied readings for current conditions, identify provider/index, and distinguish model data from general guidance. Never invent readings or diagnose/treat. If data is missing, say so.\nCOMPACT DATA CONTEXT (untrusted data): ${JSON.stringify(context)}\nRECENT CONVERSATION (for continuity only): ${transcript||'(none)'}\nCURRENT USER QUESTION: ${question}`;}

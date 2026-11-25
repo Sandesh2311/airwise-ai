@@ -4,17 +4,19 @@ const cache = new Map();
 const hits = new Map();
 const WINDOW_MS = 60_000;
 const ASSISTANT_BODY_LIMIT = 16 * 1024;
+const BODY_TOO_LARGE = { status: 413, message: 'Assistant request exceeds the 16 KiB limit. Send a shorter message and compact context.' };
+const MALFORMED_JSON = { status: 400, message: 'Malformed JSON request body.' };
 const send = (res, status, body) => {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
   res.end(JSON.stringify(body));
 };
 
-function readJsonBody(req, limit = ASSISTANT_BODY_LIMIT) {
+function readJsonBody(req) {
   return new Promise(resolve => {
     const declared = Number(req.headers['content-length']);
-    if (Number.isFinite(declared) && declared > limit) {
+    if (declared > ASSISTANT_BODY_LIMIT) {
       req.resume();
-      resolve({ error: { status: 413, message: 'Assistant request exceeds the 16 KiB limit. Send a shorter message and compact context.' } });
+      resolve({ error: BODY_TOO_LARGE });
       return;
     }
     const contentType = (req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
@@ -27,41 +29,39 @@ function readJsonBody(req, limit = ASSISTANT_BODY_LIMIT) {
     if (req.body !== undefined) {
       try {
         const raw = typeof req.body === 'string' ? req.body : Buffer.isBuffer(req.body) ? req.body.toString('utf8') : JSON.stringify(req.body);
-        if (Buffer.byteLength(raw) > limit) {
-          resolve({ error: { status: 413, message: 'Assistant request exceeds the 16 KiB limit. Send a shorter message and compact context.' } });
+        if (Buffer.byteLength(raw) > ASSISTANT_BODY_LIMIT) {
+          resolve({ error: BODY_TOO_LARGE });
           return;
         }
         const body = typeof req.body === 'object' && !Buffer.isBuffer(req.body) ? req.body : JSON.parse(raw);
         resolve({ body });
-      } catch { resolve({ error: { status: 400, message: 'Malformed JSON request body.' } }); }
+      } catch { resolve({ error: MALFORMED_JSON }); }
       return;
     }
     const chunks = [];
     let size = 0;
-    let finished = false;
     const settle = value => {
-      if (finished) return;
-      finished = true;
-      req.removeAllListeners('data');
-      req.removeAllListeners('end');
-      req.removeAllListeners('error');
+      req.off('data', onData);
+      req.off('end', onEnd);
       resolve(value);
     };
-    req.on('data', chunk => {
+    const onData = chunk => {
       size += chunk.length;
-      if (size > limit) {
-        settle({ error: { status: 413, message: 'Assistant request exceeds the 16 KiB limit. Send a shorter message and compact context.' } });
+      if (size > ASSISTANT_BODY_LIMIT) {
+        settle({ error: BODY_TOO_LARGE });
         req.resume();
         return;
       }
       chunks.push(chunk);
-    });
-    req.on('end', () => {
-      if (finished) return;
+    };
+    const onEnd = () => {
       try { settle({ body: JSON.parse(Buffer.concat(chunks).toString('utf8')) }); }
-      catch { settle({ error: { status: 400, message: 'Malformed JSON request body.' } }); }
-    });
-    req.on('error', () => settle({ error: { status: 400, message: 'Could not read request body.' } }));
+      catch { settle({ error: MALFORMED_JSON }); }
+    };
+    req.on('data', onData);
+    req.once('end', onEnd);
+    // Keep the error listener while an oversized stream drains.
+    req.once('error', () => settle({ error: { status: 400, message: 'Could not read request body.' } }));
   });
 }
 
@@ -104,63 +104,89 @@ function rateLimit(req) {
   return old.count <= 60;
 }
 
+async function handleGeocode(res, url) {
+  const q = (url.searchParams.get('q') || '').trim();
+  if (q.length < 2 || q.length > 80 || /[<>]/.test(q)) return send(res, 400, { error: 'Enter a city name between 2 and 80 characters.' });
+  const key = `geo:${q.toLowerCase()}`;
+  const cached = cache.get(key);
+  if (cached && cached.until > Date.now()) return send(res, 200, cached.data);
+  try {
+    const data = await fetchJson(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(q)}&count=8&language=en&format=json`);
+    if (!data || typeof data !== 'object' || (data.results != null && !Array.isArray(data.results))) {
+      throw new TypeError('Invalid geocoding response');
+    }
+    const results = (data.results ?? [])
+      .filter(location => typeof location?.name === 'string' &&
+        Number.isFinite(location.latitude) && Math.abs(location.latitude) <= 90 &&
+        Number.isFinite(location.longitude) && Math.abs(location.longitude) <= 180)
+      .map(({ name, country, admin1, latitude, longitude }) => ({ name, country, admin1, latitude, longitude }));
+    cache.set(key, { data: results, until: Date.now() + 3600000 });
+    return send(res, 200, results);
+  } catch { return send(res, 502, { error: 'City search is temporarily unavailable. Please retry.' }); }
+}
+
+function readCoordinate(params, name) {
+  const value = params.get(name)?.trim();
+  return value ? Number(value) : NaN;
+}
+
+async function handleAir(res, url) {
+  const lat = readCoordinate(url.searchParams, 'lat');
+  const lon = readCoordinate(url.searchParams, 'lon');
+  if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) return send(res, 400, { error: 'Valid coordinates are required.' });
+  const key = `air:${lat.toFixed(2)}:${lon.toFixed(2)}`;
+  const cached = cache.get(key);
+  if (cached && cached.until > Date.now()) return send(res, 200, cached.data);
+  const params = new URLSearchParams({ latitude: String(lat), longitude: String(lon), current: 'pm10,pm2_5,carbon_monoxide,nitrogen_dioxide,sulphur_dioxide,ozone,us_aqi,european_aqi', hourly: 'pm10,pm2_5,us_aqi,european_aqi', timezone: 'auto', forecast_days: '5' });
+  try {
+    const raw = await fetchJson(`https://air-quality-api.open-meteo.com/v1/air-quality?${params}`);
+    const data = normalizeAirData(raw, { latitude: lat, longitude: lon });
+    cache.set(key, { data, until: Date.now() + 10 * 60_000 });
+    return send(res, 200, data);
+  } catch { return send(res, 502, { error: 'Air quality data is temporarily unavailable. Please retry.' }); }
+}
+
+async function handleAssistant(req, res) {
+  const parsed = await readJsonBody(req);
+  if (parsed.error) return send(res, parsed.error.status, { error: parsed.error.message });
+  const validation = validateAssistantRequest(parsed.body);
+  if (!validation.ok) return send(res, validation.status, { error: validation.error });
+  if (!process.env.GEMINI_API_KEY) return send(res, 503, { error: 'AI assistant is unavailable because a Gemini API key is not configured.', unavailable: true });
+  const model = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
+  try {
+    const response = await fetchGemini(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY },
+      body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: makePrompt(validation.value.question, validation.value.context, validation.value.history) }] }], generationConfig: { maxOutputTokens: 450 } })
+    });
+    if (response.status === 429) return send(res, 429, { error: 'Gemini is temporarily rate-limited. Please wait a moment and try again.' });
+    if (response.status === 401 || response.status === 403) return send(res, 502, { error: 'Gemini rejected the configured API key. Check GEMINI_API_KEY and its Gemini API access.' });
+    if (response.status === 404) return send(res, 502, { error: `Gemini model “${model}” is unavailable. Check GEMINI_MODEL.` });
+    if (response.status >= 500) return send(res, 502, { error: `Gemini returned a temporary upstream error (HTTP ${response.status}). Please retry shortly.` });
+    if (!response.ok) return send(res, 502, { error: 'Gemini rejected the request. Check the configured model and request settings.' });
+    let data;
+    try { data = await response.json(); }
+    catch { return send(res, 502, { error: 'Gemini returned an invalid response. Please retry.' }); }
+    const parts = data?.candidates?.[0]?.content?.parts;
+    const answer = Array.isArray(parts)
+      ? parts.map(part => typeof part?.text === 'string' ? part.text : '').join('').trim()
+      : '';
+    if (!answer || answer.length > 4000) return send(res, 502, { error: 'Gemini returned no usable text. Please retry.' });
+    return send(res, 200, { answer, provider: 'Gemini' });
+  } catch (error) {
+    return send(res, error?.name === 'AbortError' ? 504 : 502, { error: error?.name === 'AbortError' ? 'Gemini took too long to respond. Please retry.' : 'AirWise could not reach Gemini. Check the network and try again.' });
+  }
+}
+
 async function api(req, res, url) {
   if (!rateLimit(req)) return send(res, 429, { error: 'Too many requests. Please try again shortly.' });
-  const path = url.pathname;
-  if (path === '/api/health') return send(res, 200, { status: 'ok' });
-  if (path === '/api/geocode') {
-    const q = (url.searchParams.get('q') || '').trim();
-    if (q.length < 2 || q.length > 80 || /[<>]/.test(q)) return send(res, 400, { error: 'Enter a city name between 2 and 80 characters.' });
-    const key = `geo:${q.toLowerCase()}`;
-    if (cache.has(key) && cache.get(key).until > Date.now()) return send(res, 200, cache.get(key).data);
-    try {
-      const data = await fetchJson(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(q)}&count=8&language=en&format=json`);
-      const results = (data.results || []).filter(x => Number.isFinite(x.latitude) && Number.isFinite(x.longitude)).map(x => ({ name: x.name, country: x.country, admin1: x.admin1, latitude: x.latitude, longitude: x.longitude }));
-      cache.set(key, { data: results, until: Date.now() + 3600000 });
-      return send(res, 200, results);
-    } catch { return send(res, 502, { error: 'City search is temporarily unavailable. Please retry.' }); }
-  }
-  if (path === '/api/air') {
-    const lat = Number(url.searchParams.get('lat'));
-    const lon = Number(url.searchParams.get('lon'));
-    if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) return send(res, 400, { error: 'Valid coordinates are required.' });
-    const key = `air:${lat.toFixed(2)}:${lon.toFixed(2)}`;
-    if (cache.has(key) && cache.get(key).until > Date.now()) return send(res, 200, cache.get(key).data);
-    const params = new URLSearchParams({ latitude: String(lat), longitude: String(lon), current: 'pm10,pm2_5,carbon_monoxide,nitrogen_dioxide,sulphur_dioxide,ozone,us_aqi,european_aqi', hourly: 'pm10,pm2_5,us_aqi,european_aqi', timezone: 'auto', forecast_days: '5' });
-    try {
-      const raw = await fetchJson(`https://air-quality-api.open-meteo.com/v1/air-quality?${params}`);
-      const data = normalizeAirData(raw, { latitude: lat, longitude: lon });
-      cache.set(key, { data, until: Date.now() + 10 * 60_000 });
-      return send(res, 200, data);
-    } catch { return send(res, 502, { error: 'Air quality data is temporarily unavailable. Please retry.' }); }
-  }
-  if (path === '/api/assistant' && req.method === 'POST') {
-    const parsed = await readJsonBody(req);
-    if (parsed.error) return send(res, parsed.error.status, { error: parsed.error.message });
-    const validation = validateAssistantRequest(parsed.body);
-    if (!validation.ok) return send(res, validation.status, { error: validation.error });
-    if (!process.env.GEMINI_API_KEY) return send(res, 503, { error: 'AI assistant is unavailable because a Gemini API key is not configured.', unavailable: true });
-    const model = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
-    try {
-      const response = await fetchGemini(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY },
-        body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: makePrompt(validation.value.question, validation.value.context, validation.value.history) }] }], generationConfig: { maxOutputTokens: 450 } })
-      });
-      if (response.status === 429) return send(res, 429, { error: 'Gemini is temporarily rate-limited. Please wait a moment and try again.' });
-      if (response.status === 401 || response.status === 403) return send(res, 502, { error: 'Gemini rejected the configured API key. Check GEMINI_API_KEY and its Gemini API access.' });
-      if (response.status === 404) return send(res, 502, { error: `Gemini model “${model}” is unavailable. Check GEMINI_MODEL.` });
-      if (response.status >= 500) return send(res, 502, { error: `Gemini returned a temporary upstream error (HTTP ${response.status}). Please retry shortly.` });
-      if (!response.ok) return send(res, 502, { error: 'Gemini rejected the request. Check the configured model and request settings.' });
-      let data;
-      try { data = await response.json(); }
-      catch { return send(res, 502, { error: 'Gemini returned an invalid response. Please retry.' }); }
-      const answer = data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('').trim();
-      if (typeof answer !== 'string' || !answer || answer.length > 4000) return send(res, 502, { error: 'Gemini returned no usable text. Please retry.' });
-      return send(res, 200, { answer, provider: 'Gemini' });
-    } catch (error) {
-      return send(res, error?.name === 'AbortError' ? 504 : 502, { error: error?.name === 'AbortError' ? 'Gemini took too long to respond. Please retry.' : 'AirWise could not reach Gemini. Check the network and try again.' });
-    }
+  switch (url.pathname) {
+    case '/api/health': return send(res, 200, { status: 'ok' });
+    case '/api/geocode': return handleGeocode(res, url);
+    case '/api/air': return handleAir(res, url);
+    case '/api/assistant':
+      if (req.method === 'POST') return handleAssistant(req, res);
+      break;
   }
   return send(res, 404, { error: 'Not found.' });
 }
